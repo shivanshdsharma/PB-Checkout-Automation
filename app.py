@@ -6,6 +6,7 @@ from PIL import Image
 from fuzzywuzzy import process
 import google.generativeai as genai
 from dotenv import load_dotenv
+import os
 
 # ——— CONFIG ———
 TITLE         = "🥐 Paris Baguette Checkout Automation"
