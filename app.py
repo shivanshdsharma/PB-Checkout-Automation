@@ -1,112 +1,112 @@
 import streamlit as st
-import json
-import io
-import re
+import pandas as pd
 from PIL import Image
-from fuzzywuzzy import process
 import google.generativeai as genai
-from dotenv import load_dotenv
-import os
+import json
+import re
+import io
 
-# ——— CONFIG ———
-TITLE         = "🥐 Paris Baguette Checkout Automation"
-MENU_FILE     = "menu.json"
-API_KEY_FILE  = "api_key.txt"
-FUZZY_THRESH  = 70
+# ---- CONFIG ----
+MODEL_NAME = "models/gemini-2.5-flash"
+MENU_FILE = "menu.xlsx"
 
-# ——— LOAD API KEY ———
+#Load API KEY
 load_dotenv()
 API_KEY = os.getenv("API_KEY")
 genai.configure(api_key=API_KEY)
 
-# ——— LOAD MENU ———
-raw_menu = json.load(open(MENU_FILE))
-MENU_DISPLAY = raw_menu
-MENU = {k: float(v.replace("$", "")) for k, v in raw_menu.items()}
-MENU_ITEMS = list(MENU.keys())
+# ---- Gemini Setup ----
+genai.configure(api_key=GOOGLE_API_KEY)
+model = genai.GenerativeModel(model_name=MODEL_NAME)
 
-# ——— GEMINI IMAGE DETECTION ———
-def detect_with_menu(image_bytes):
-    menu_list = "\n".join(f"- {item}" for item in MENU_ITEMS)
-    prompt = (
-        "You're given a bakery tray image. Here's the Paris Baguette menu:\n"
-        f"{menu_list}\n\n"
-        "Which of these items are visible and how many of each?\n"
-        "Respond in the format:\n* Item Name (xN)\nOnly list menu items."
-    )
-    model = genai.GenerativeModel("gemini-1.5-flash")
-    img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-    response = model.generate_content([prompt, img])
-    return response.text.strip()
+# ---- Menu (read 'Name' column only) ----
+menu_df = pd.read_excel(MENU_FILE)
+menu_df = menu_df.dropna(subset=["Name"])
+product_names = menu_df["Name"].tolist()
 
-# ——— PARSE RESPONSE ———
-ITEM_RE = re.compile(r"^[\*\-\•]\s*(.+?)\s*\([x×](\d+)\)", re.MULTILINE)
-def parse(caption):
-    return ITEM_RE.findall(caption)
+# ---- Extract JSON utility ----
+def extract_json(text):
+    match = re.search(r"\{.*?\}", text, re.DOTALL)
+    if match:
+        try:
+            return json.loads(match.group(0))
+        except Exception:
+            return {}
+    try:
+        return json.loads(text)
+    except Exception:
+        return {}
 
-# ——— BILL GENERATION ———
-def build_bill(parsed):
-    bill = {}
-    total = 0.0
-    for name, count_str in parsed:
-        count = int(count_str)
-        match, score = process.extractOne(name, MENU_ITEMS)
-        if score >= FUZZY_THRESH:
-            price = MENU[match]
-            subtotal = price * count
-            bill[match] = bill.get(match, {"qty": 0, "subtotal": 0.0})
-            bill[match]["qty"] += count
-            bill[match]["subtotal"] += subtotal
-            total += subtotal
-    return bill, total
+# ---- UI Layout ----
+st.set_page_config(page_title="Paris Baguette Checkout Automation", layout="wide")
+main_col, side_col = st.columns([3, 1], gap="large")
 
-# ——— STREAMLIT UI ———
-st.set_page_config(page_title=TITLE, layout="wide")
-st.title(TITLE)
+with main_col:
+    st.markdown("<h2 style='text-align:center;'>Paris Baguette Checkout</h2>", unsafe_allow_html=True)
+    cam_img = st.camera_input("Take Tray Photo")
+    upload_img = st.file_uploader("Or upload tray image", type=["jpg", "jpeg", "png"])
+    photo = cam_img if cam_img else upload_img
+    checkout = st.button("Checkout", use_container_width=True)
 
-col1, col2 = st.columns([5, 1])
-with col1:
-    uploaded = st.file_uploader("📤 Upload Tray Image", type=["jpg", "jpeg", "png"], label_visibility="collapsed")
-with col2:
-    st.markdown(" ")
-    run = st.button("🧾 Checkout", use_container_width=True)
+with side_col:
+    result_placeholder = st.empty()
 
-if uploaded:
-    img = Image.open(uploaded).convert("RGB")
-    st.image(img, caption="Your Tray", width=300)  # 👈 Smaller image display
+if photo and checkout:
+    with st.spinner("Detecting items..."):
+        image_pil = Image.open(photo).convert("RGB")
+        # Resize for efficiency
+        if image_pil.width > 1024:
+            ratio = 1024.0 / image_pil.width
+            image_pil = image_pil.resize((1024, int(image_pil.height * ratio)), Image.LANCZOS)
 
-    if run:
-        st.info("🧠 Detecting items with Gemini… please wait ⏳")
-        image_bytes = uploaded.getvalue()
+        menu_list = ", ".join(product_names[:10]) + (", ..." if len(product_names) > 10 else "")
+        prompt = (
+            f"You are a checkout assistant for Paris Baguette. Given ONLY this menu: {menu_list}, "
+            "detect and count all items in the tray photo. "
+            'Return ONLY a JSON object: {"Item1": quantity, "Item2": quantity}. No additional text.'
+        )
 
         try:
-            caption = detect_with_menu(image_bytes)
+            response = model.generate_content(
+                [prompt, image_pil],
+                generation_config={"temperature": 0.1, "max_output_tokens": 1024},
+                stream=False,
+            )
         except Exception as e:
-            st.error(f"❌ Gemini API Error: {e}")
+            result_placeholder.error(f"Gemini API error: {e}")
             st.stop()
 
-        st.subheader("🧠 Gemini Output")
-        st.text(caption)
-
-        parsed = parse(caption)
-        if not parsed:
-            st.warning("⚠️ No valid items detected. Try another image.")
+        # Validate Gemini's response
+        if not hasattr(response, "candidates") or not response.candidates:
+            result_placeholder.error("No response candidates from Gemini. Try another image or check quota/content policy.")
+            st.stop()
+        candidate = response.candidates[0]
+        if not hasattr(candidate, "content") or not getattr(candidate.content, "parts", []):
+            code = getattr(candidate, "finish_reason", "UNKNOWN")
+            result_placeholder.error(f"Gemini returned no output (finish_reason={code}).")
             st.stop()
 
-        st.subheader("📖 Parsed Items")
-        for name, count in parsed:
-            st.write(f"• {name} × {count}")
-
-        bill, total = build_bill(parsed)
-        if not bill:
-            st.error("❌ No matching items found in `menu.json`.")
+        try:
+            answer = response.text
+        except Exception as e:
+            result_placeholder.error(f"Gemini output parsing failed: {e}")
             st.stop()
 
-        st.sidebar.title("🧾 Final Bill")
-        for item, data in bill.items():
-            st.sidebar.write(f"{item} × {data['qty']} = ${data['subtotal']:.2f}")
-        st.sidebar.markdown("---")
-        st.sidebar.write(f"**Total: ${total:.2f}**")
+        detected_items = extract_json(answer)
+        if not detected_items:
+            result_placeholder.error("No parsable output from Gemini. Raw output:\n" + str(answer))
+            st.stop()
 
-else:
-    st.info("Upload a tray image to begin.")
+        # ---- Output in Left Pane ----
+        with result_placeholder.container():
+            st.markdown("<h4>Detected Tray Items</h4>", unsafe_allow_html=True)
+            for item, qty in detected_items.items():
+                st.write(f"{item} × {qty}")
+            if not detected_items:
+                st.info("No items detected in tray.")
+            st.image(image_pil, caption="Tray Photo", width=320)
+            with st.expander("Show Gemini Raw Output"):
+                st.code(answer)
+
+elif not photo:
+    result_placeholder.info("Capture or upload a tray image to begin. Only detected item names will populate here after checkout.")
