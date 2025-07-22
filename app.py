@@ -4,27 +4,23 @@ from PIL import Image
 import google.generativeai as genai
 import json
 import re
-import io
+import os
 
 # ---- CONFIG ----
 MODEL_NAME = "models/gemini-2.5-flash"
 MENU_FILE = "menu.xlsx"
 
-#Load API KEY
-load_dotenv()
-API_KEY = os.getenv("API_KEY")
+# ---- Secure API Key Load ----
+API_KEY = st.secrets["API_KEY"] if "API_KEY" in st.secrets else os.getenv("API_KEY")
 genai.configure(api_key=API_KEY)
-
-# ---- Gemini Setup ----
-genai.configure(api_key=GOOGLE_API_KEY)
 model = genai.GenerativeModel(model_name=MODEL_NAME)
 
-# ---- Menu (read 'Name' column only) ----
+# ---- Menu Loading ----
 menu_df = pd.read_excel(MENU_FILE)
 menu_df = menu_df.dropna(subset=["Name"])
 product_names = menu_df["Name"].tolist()
 
-# ---- Extract JSON utility ----
+# ---- JSON Extraction ----
 def extract_json(text):
     match = re.search(r"\{.*?\}", text, re.DOTALL)
     if match:
@@ -43,10 +39,16 @@ main_col, side_col = st.columns([3, 1], gap="large")
 
 with main_col:
     st.markdown("<h2 style='text-align:center;'>Paris Baguette Checkout</h2>", unsafe_allow_html=True)
-    cam_img = st.camera_input("Take Tray Photo")
-    upload_img = st.file_uploader("Or upload tray image", type=["jpg", "jpeg", "png"])
-    photo = cam_img if cam_img else upload_img
-    checkout = st.button("Checkout", use_container_width=True)
+    st.write("Take or upload a photo of the tray below and click **Checkout**.")  # Instruction for user
+
+    # ---- Input Area: Camera/File & Checkout Button Together ----
+    top_col1, top_col2 = st.columns([4, 1])
+    with top_col1:
+        cam_img = st.camera_input("Take Tray Photo")
+        upload_img = st.file_uploader("Or upload tray image", type=["jpg", "jpeg", "png"])
+        photo = cam_img if cam_img else upload_img
+    with top_col2:
+        checkout = st.button("Checkout", use_container_width=True)
 
 with side_col:
     result_placeholder = st.empty()
@@ -54,7 +56,6 @@ with side_col:
 if photo and checkout:
     with st.spinner("Detecting items..."):
         image_pil = Image.open(photo).convert("RGB")
-        # Resize for efficiency
         if image_pil.width > 1024:
             ratio = 1024.0 / image_pil.width
             image_pil = image_pil.resize((1024, int(image_pil.height * ratio)), Image.LANCZOS)
@@ -76,7 +77,6 @@ if photo and checkout:
             result_placeholder.error(f"Gemini API error: {e}")
             st.stop()
 
-        # Validate Gemini's response
         if not hasattr(response, "candidates") or not response.candidates:
             result_placeholder.error("No response candidates from Gemini. Try another image or check quota/content policy.")
             st.stop()
@@ -94,10 +94,9 @@ if photo and checkout:
 
         detected_items = extract_json(answer)
         if not detected_items:
-            result_placeholder.error("No parsable output from Gemini. Raw output:\n" + str(answer))
+            result_placeholder.error(f"No parsable output from Gemini. Raw output:\n{answer}")
             st.stop()
 
-        # ---- Output in Left Pane ----
         with result_placeholder.container():
             st.markdown("<h4>Detected Tray Items</h4>", unsafe_allow_html=True)
             for item, qty in detected_items.items():
@@ -109,4 +108,5 @@ if photo and checkout:
                 st.code(answer)
 
 elif not photo:
-    result_placeholder.info("Capture or upload a tray image to begin. Only detected item names will populate here after checkout.")
+    result_placeholder.info("Capture or upload a tray image to begin. Detected item names will appear here after checkout.")
+
